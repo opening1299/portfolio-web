@@ -1,0 +1,13 @@
+{
+  "name": "주식 포트폴리오",
+  "short_name": "포트폴리오",
+  "description": "데스크톱 포트폴리오 백업 열람 및 간단 거래 추가",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#11171d",
+  "theme_color": "#1f2933",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

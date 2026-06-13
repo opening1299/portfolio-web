@@ -1,0 +1,113 @@
+:root {
+  --bg: #11171d;
+  --panel: #1b232c;
+  --panel2: #222d38;
+  --text: #e6edf3;
+  --muted: #8b98a5;
+  --line: #2c3744;
+  --accent: #4c8bf5;
+  --up: #ff5d5d;     /* 한국 관례: 상승/이익 빨강 */
+  --down: #4c9bff;   /* 하락/손실 파랑 */
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+[hidden] { display: none !important; }   /* display:flex 등이 hidden을 덮어쓰지 않도록 */
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: -apple-system, "Segoe UI", "Malgun Gothic", system-ui, sans-serif;
+  font-size: 15px; line-height: 1.5;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+header {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+  padding-top: calc(14px + env(safe-area-inset-top));
+}
+header h1 { font-size: 17px; margin: 0; font-weight: 700; }
+.hdr-actions { display: flex; gap: 8px; }
+.icon-btn {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 8px; width: 38px; height: 38px; font-size: 18px; cursor: pointer;
+}
+main { padding: 16px; max-width: 720px; margin: 0 auto; }
+h2 { font-size: 15px; color: var(--muted); margin: 22px 0 10px; font-weight: 600; }
+
+.center { text-align: center; padding: 48px 16px; }
+.muted { color: var(--muted); }
+.small { font-size: 12.5px; }
+
+button { font-family: inherit; font-size: 15px; }
+.primary {
+  background: var(--accent); color: #fff; border: none; border-radius: 10px;
+  padding: 13px 20px; font-weight: 600; cursor: pointer;
+}
+.primary.wide { display: block; width: 100%; margin-top: 18px; }
+
+/* 요약 카드 */
+.cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 12px; padding: 14px;
+}
+.card .label { color: var(--muted); font-size: 12.5px; }
+.card .value { font-size: 19px; font-weight: 700; margin-top: 4px; }
+.card.full { grid-column: 1 / -1; }
+
+/* 테이블 */
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
+table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+th, td { padding: 10px 10px; text-align: left; white-space: nowrap; }
+thead th { background: var(--panel2); color: var(--muted); font-weight: 600; font-size: 12.5px; }
+tbody tr { border-top: 1px solid var(--line); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.up { color: var(--up); }
+.down { color: var(--down); }
+
+/* 동기화 대기 */
+.pending ul { list-style: none; padding: 0; margin: 0; }
+.pending li {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; margin-bottom: 8px; font-size: 13.5px;
+}
+.badge {
+  background: var(--accent); color: #fff; border-radius: 999px;
+  padding: 1px 9px; font-size: 12px; margin-left: 6px;
+}
+
+/* 모달 */
+.modal {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+  display: flex; align-items: flex-end; justify-content: center; z-index: 20;
+}
+.modal-card {
+  background: var(--panel); width: 100%; max-width: 560px;
+  border-radius: 16px 16px 0 0; padding: 20px 18px;
+  padding-bottom: calc(20px + env(safe-area-inset-bottom));
+  max-height: 90vh; overflow-y: auto;
+}
+.modal-card h2 { color: var(--text); margin-top: 0; }
+form label { display: block; margin-bottom: 12px; color: var(--muted); font-size: 13px; }
+form .row { display: flex; gap: 12px; }
+form .row label { flex: 1; }
+input, select {
+  width: 100%; margin-top: 5px; padding: 11px 12px; font-size: 15px;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 9px;
+}
+.modal-actions { display: flex; gap: 10px; margin-top: 8px; }
+.modal-actions button { flex: 1; padding: 13px; border-radius: 10px; }
+#cancelAddBtn { background: var(--panel2); color: var(--text); border: 1px solid var(--line); cursor: pointer; }
+
+/* 스피너 / 토스트 */
+.spinner {
+  width: 30px; height: 30px; margin: 0 auto 14px;
+  border: 3px solid var(--line); border-top-color: var(--accent);
+  border-radius: 50%; animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.toast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  background: #000; color: #fff; padding: 11px 18px; border-radius: 999px;
+  font-size: 13.5px; z-index: 40; max-width: 90%;
+}

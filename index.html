@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1f2933">
+  <title>주식 포트폴리오</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="stylesheet" href="style.css">
+  <!-- Google Identity Services (OAuth 토큰) -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <!-- sql.js (SQLite WASM) -->
+  <script src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"></script>
+</head>
+<body>
+  <header>
+    <h1>주식 포트폴리오</h1>
+    <div class="hdr-actions">
+      <button id="refreshBtn" class="icon-btn" title="새로고침" hidden>↻</button>
+      <button id="signoutBtn" class="icon-btn" title="로그아웃" hidden>⎋</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- 로그인 화면 -->
+    <section id="authView" class="center">
+      <p class="muted">구글 계정으로 로그인하면<br>데스크톱이 백업한 포트폴리오를 불러옵니다.</p>
+      <button id="signinBtn" class="primary">구글로 로그인</button>
+    </section>
+
+    <!-- 상태 메시지 -->
+    <section id="statusView" class="center" hidden>
+      <div class="spinner"></div>
+      <p id="statusMsg" class="muted">불러오는 중…</p>
+    </section>
+
+    <!-- 데이터 화면 -->
+    <section id="dataView" hidden>
+      <!-- 수익 요약 -->
+      <div class="cards" id="summaryCards"></div>
+
+      <!-- 보유종목 -->
+      <h2>보유종목 · 평가손익</h2>
+      <div class="table-wrap">
+        <table id="holdingsTable">
+          <thead>
+            <tr><th>종목</th><th class="num">수량</th><th class="num">평단</th>
+                <th class="num">현재가</th><th class="num">평가액</th><th class="num">손익</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <!-- 동기화 대기 -->
+      <div id="pendingBox" class="pending" hidden>
+        <h2>동기화 대기 <span id="pendingCount" class="badge">0</span></h2>
+        <ul id="pendingList"></ul>
+        <p class="muted small">데스크톱 앱을 켜면 이 항목들이 반영됩니다.</p>
+      </div>
+
+      <!-- 거래 추가 -->
+      <button id="openAddBtn" class="primary wide">＋ 거래 추가</button>
+    </section>
+  </main>
+
+  <!-- 거래 추가 모달 -->
+  <div id="addModal" class="modal" hidden>
+    <div class="modal-card">
+      <h2>거래 추가</h2>
+      <form id="addForm">
+        <label>종목
+          <select name="stock_id" required></select>
+        </label>
+        <label>계좌
+          <select name="account_id" required></select>
+        </label>
+        <div class="row">
+          <label>날짜
+            <input type="date" name="trade_date" required>
+          </label>
+          <label>종류
+            <select name="trade_type" required>
+              <option value="BUY">매수</option>
+              <option value="SELL">매도</option>
+              <option value="DIVIDEND">배당</option>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <label id="qtyLabel">수량
+            <input type="number" name="quantity" step="any" min="0" value="0">
+          </label>
+          <label id="priceLabel">단가
+            <input type="number" name="price" step="any" min="0" value="0">
+          </label>
+        </div>
+        <label>수수료
+          <input type="number" name="fee" step="any" min="0" value="0">
+        </label>
+        <label>메모
+          <input type="text" name="memo" placeholder="(선택)">
+        </label>
+        <div class="modal-actions">
+          <button type="button" id="cancelAddBtn">취소</button>
+          <button type="submit" class="primary">입력함에 추가</button>
+        </div>
+        <p class="muted small">* 폰에서는 "입력함"에만 쌓이고, 데스크톱 앱이 실제 DB에 반영합니다.</p>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

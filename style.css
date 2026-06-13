@@ -43,6 +43,12 @@ button { font-family: inherit; font-size: 15px; }
   padding: 13px 20px; font-weight: 600; cursor: pointer;
 }
 .primary.wide { display: block; width: 100%; margin-top: 18px; }
+.ghost {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 10px; padding: 13px 20px; font-weight: 600; cursor: pointer;
+}
+.add-row { display: flex; gap: 10px; margin-top: 18px; }
+.add-row button { flex: 1; }
 
 /* 요약 카드 */
 .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }

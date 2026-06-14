@@ -8,6 +8,35 @@ const statusMsg = $("statusMsg"), toast = $("toast");
 // ── 인증 (Google Identity Services 토큰 플로) ────────────────
 let accessToken = null, tokenClient = null, tokenResolve = null, tokenReject = null;
 
+// 단기(≈1시간) 액세스 토큰을 localStorage에 캐시 → 새로고침/재실행 시 재로그인 회피.
+// 리프레시 토큰은 저장하지 않음(브라우저 토큰 플로엔 존재하지 않음).
+const TOKEN_KEY = "pf_token";
+const TOKEN_SKEW_MS = 60 * 1000;   // 만료 1분 전엔 무효로 간주
+
+function saveToken(resp) {
+  if (!resp || !resp.access_token) return;
+  accessToken = resp.access_token;
+  const ttl = (parseInt(resp.expires_in, 10) || 3600) * 1000;
+  try {
+    localStorage.setItem(TOKEN_KEY, JSON.stringify({ t: accessToken, exp: Date.now() + ttl }));
+  } catch { /* 저장 실패는 무시 (세션 토큰으로 동작) */ }
+}
+
+function loadCachedToken() {
+  try {
+    const raw = localStorage.getItem(TOKEN_KEY);
+    if (!raw) return null;
+    const { t, exp } = JSON.parse(raw);
+    if (t && exp && Date.now() < exp - TOKEN_SKEW_MS) return t;
+  } catch { /* 손상된 캐시 무시 */ }
+  return null;
+}
+
+function clearToken() {
+  accessToken = null;
+  try { localStorage.removeItem(TOKEN_KEY); } catch { /* ignore */ }
+}
+
 function waitForGoogle(timeoutMs = 6000) {
   return new Promise((resolve, reject) => {
     if (window.google && google.accounts) return resolve();
@@ -26,7 +55,7 @@ function ensureTokenClient() {
     client_id: GOOGLE_CLIENT_ID,
     scope: DRIVE_SCOPE,
     callback: (resp) => {
-      if (resp && resp.access_token) accessToken = resp.access_token;
+      if (resp && resp.access_token) saveToken(resp);
       const r = tokenResolve; tokenResolve = tokenReject = null;
       if (r) r(resp);
     },
@@ -350,8 +379,18 @@ async function signIn() {
   }
 }
 
-// 앱 시작 시 자동(silent) 로그인 시도 — 세션 살아있고 동의했으면 버튼 없이 진입
+// 앱 시작 시: 캐시된 토큰이 유효하면 즉시 진입, 아니면 silent 재인증 시도
 async function init() {
+  const cached = loadCachedToken();
+  if (cached) {
+    accessToken = cached;
+    try {
+      await loadAll();   // 유효 토큰으로 바로 진입 (구글 호출 없음)
+      return;
+    } catch {
+      clearToken();      // 만료/무효였으면 캐시 비우고 silent 재시도로 폴백
+    }
+  }
   try {
     await waitForGoogle();
     showStatus("로그인 확인 중…");
@@ -366,7 +405,7 @@ async function init() {
 // ── 이벤트 ──────────────────────────────────────────────────
 $("signinBtn").addEventListener("click", signIn);
 $("refreshBtn").addEventListener("click", () => loadAll().catch((e) => showToast("새로고침 실패: " + e.message)));
-$("signoutBtn").addEventListener("click", () => { accessToken = null; showAuth(); showToast("로그아웃되었습니다."); });
+$("signoutBtn").addEventListener("click", () => { clearToken(); showAuth(); showToast("로그아웃되었습니다."); });
 $("openAddBtn").addEventListener("click", openModal);
 $("cancelAddBtn").addEventListener("click", closeModal);
 $("addForm").addEventListener("submit", submitAdd);

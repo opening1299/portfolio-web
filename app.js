@@ -1,4 +1,4 @@
-import { GOOGLE_CLIENT_ID, DRIVE_SCOPE, SQLJS_BASE } from "./config.js";
+import { GOOGLE_CLIENT_ID, DRIVE_SCOPE, SQLJS_BASE, PROXY_BASE } from "./config.js";
 
 // ── DOM ─────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
@@ -178,6 +178,10 @@ const cls = (v) => (v > 0 ? "up" : v < 0 ? "down" : "");
 
 let dbMeta = { stocks: [], accounts: [] };   // 거래 추가 폼용 캐시
 let pendingItems = [];                        // 현재 입력함(inbox) 항목
+// DB 로드 결과 캐시(재계산용) + 라이브 시세 오버레이. 시세 갱신 시 DB 재다운로드 없이 재렌더.
+let lastData = null;        // { positions:[{id,name,code,currency,holdings,avg,purchase,realized,dividend}], dbPrices, dbFx }
+let livePrices = {};        // { stock_id: 실시간가 } — 프록시로 갱신, 없으면 DB값 사용
+let liveFx = null;          // 실시간 USD/KRW, 없으면 DB값 사용
 const genId = () => (crypto.randomUUID ? crypto.randomUUID() : "id" + Date.now() + Math.random());
 
 function renderSummary(s) {
@@ -243,34 +247,25 @@ async function loadAll() {
   const db = await openDb();
   try {
     const fxRow = query(db, "SELECT value FROM settings WHERE key='usd_krw'")[0];
-    const fx = fxRow ? parseFloat(fxRow.value) : 1380;
+    const dbFx = fxRow ? parseFloat(fxRow.value) : 1380;
     const stocks = query(db, "SELECT * FROM stocks ORDER BY name");
     const accounts = query(db, "SELECT id, name FROM accounts ORDER BY sort_order, name");
     dbMeta = { stocks, accounts };
 
-    const prices = {};
-    for (const p of query(db, "SELECT stock_id, current_price FROM prices")) prices[p.stock_id] = +p.current_price;
+    const dbPrices = {};
+    for (const p of query(db, "SELECT stock_id, current_price FROM prices")) dbPrices[p.stock_id] = +p.current_price;
 
-    let totEval = 0, totBuy = 0, totRealized = 0, totDiv = 0;
-    const holdingRows = [];
+    // 종목별 포지션을 캐시 → 시세 갱신 시 DB 재다운로드 없이 재계산
+    const positions = [];
     for (const s of stocks) {
       const txs = query(db, "SELECT trade_type, price, quantity, fee FROM transactions WHERE stock_id=? ORDER BY trade_date, id", [s.id]);
       const pos = position(txs);
-      const cp = prices[s.id] || 0;
-      const k = (s.currency === "USD") ? fx : 1.0;
-      totRealized += pos.realized * k;
-      totDiv += pos.dividend * k;
-      if (pos.holdings > EPS) {
-        const evalKrw = cp * pos.holdings * k;
-        const buyKrw = pos.purchase * k;
-        totEval += evalKrw; totBuy += buyKrw;
-        holdingRows.push({ name: s.name, qty: pos.holdings, avg: pos.avg, cp,
-          evalKrw, pnl: evalKrw - buyKrw, rate: buyKrw ? (evalKrw - buyKrw) / buyKrw : 0, cur: s.currency || "KRW" });
-      }
+      positions.push({ id: s.id, name: s.name, code: s.code, currency: s.currency || "KRW",
+        holdings: pos.holdings, avg: pos.avg, purchase: pos.purchase, realized: pos.realized, dividend: pos.dividend });
     }
-    holdingRows.sort((a, b) => b.evalKrw - a.evalKrw);
-    renderSummary({ totEval, totBuy, pnl: totEval - totBuy, rate: totBuy ? (totEval - totBuy) / totBuy : 0, realized: totRealized, div: totDiv });
-    renderHoldings(holdingRows);
+    lastData = { positions, dbPrices, dbFx };
+    livePrices = {}; liveFx = null;   // 새 DB 로드 시 라이브 오버레이 초기화
+    renderPortfolio();
   } finally {
     db.close();
   }
@@ -279,6 +274,77 @@ async function loadAll() {
   renderPending(items);
   populateAddForm();     // dbMeta + 대기 종목 반영
   showData();
+  const info = $("syncInfo"); if (info) info.textContent = "";   // 이전 갱신 표시 초기화
+}
+
+// 캐시된 포지션 + (있으면)라이브 시세/환율로 요약·보유표 재렌더. DB 재접근 없음.
+function renderPortfolio() {
+  if (!lastData) return;
+  const { positions, dbPrices, dbFx } = lastData;
+  const fx = liveFx ?? dbFx;
+  let totEval = 0, totBuy = 0, totRealized = 0, totDiv = 0;
+  const rows = [];
+  for (const p of positions) {
+    const k = (p.currency === "USD") ? fx : 1.0;
+    totRealized += p.realized * k;
+    totDiv += p.dividend * k;
+    if (p.holdings > EPS) {
+      const cp = livePrices[p.id] ?? dbPrices[p.id] ?? 0;   // 라이브 우선, 없으면 DB값
+      const evalKrw = cp * p.holdings * k;
+      const buyKrw = p.purchase * k;
+      totEval += evalKrw; totBuy += buyKrw;
+      rows.push({ name: p.name, qty: p.holdings, avg: p.avg, cp,
+        evalKrw, pnl: evalKrw - buyKrw, rate: buyKrw ? (evalKrw - buyKrw) / buyKrw : 0, cur: p.currency });
+    }
+  }
+  rows.sort((a, b) => b.evalKrw - a.evalKrw);
+  renderSummary({ totEval, totBuy, pnl: totEval - totBuy, rate: totBuy ? (totEval - totBuy) / totBuy : 0, realized: totRealized, div: totDiv });
+  renderHoldings(rows);
+}
+
+// ── 실시간 시세 갱신 (프록시 경유, 표시 전용 — DB/Drive 미기록) ──
+// 동시성 제한 풀: items 를 limit 개씩만 병렬로 fn 실행
+async function pool(items, limit, fn) {
+  let i = 0;
+  const run = async () => { while (i < items.length) { const idx = i++; await fn(items[idx]); } };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
+}
+
+let syncing = false;
+async function refreshPrices() {
+  if (!lastData || syncing) return;
+  syncing = true;
+  const btn = $("syncPriceBtn"), info = $("syncInfo");
+  if (btn) btn.disabled = true;
+  if (info) info.textContent = "시세 갱신 중…";
+
+  // 환율 먼저 (해외주식 환산 반영)
+  try {
+    const j = await (await fetch(`${PROXY_BASE}/fx`)).json();
+    if (j && j.usdkrw > 0) liveFx = j.usdkrw;
+  } catch { /* 실패 시 DB 환율 유지 */ }
+
+  // 보유 종목만 시세 조회 (실현손익은 가격 불필요)
+  const held = lastData.positions.filter((p) => p.holdings > EPS);
+  const fresh = {};
+  let ok = 0, fail = 0;
+  await pool(held, 5, async (p) => {
+    try {
+      const market = p.currency === "USD" ? "USD" : "KRW";
+      const url = `${PROXY_BASE}/price?market=${market}`
+        + `&code=${encodeURIComponent(p.code || "")}&name=${encodeURIComponent(p.name || "")}`;
+      const j = await (await fetch(url)).json();
+      if (j && j.price > 0) { fresh[p.id] = j.price; ok++; } else fail++;
+    } catch { fail++; }
+  });
+
+  livePrices = fresh;        // 실패 종목은 자동으로 DB값으로 폴백(renderPortfolio)
+  renderPortfolio();
+
+  const fxTxt = liveFx ? ` · 환율 ${Math.round(liveFx).toLocaleString("ko-KR")}` : "";
+  if (info) info.textContent = `${ok}종목 갱신${fail ? ` · ${fail} 실패` : ""}${fxTxt}`;
+  if (btn) btn.disabled = false;
+  syncing = false;
 }
 
 // ── 거래 / 종목 추가 ────────────────────────────────────────
@@ -406,6 +472,7 @@ async function init() {
 $("signinBtn").addEventListener("click", signIn);
 $("refreshBtn").addEventListener("click", () => loadAll().catch((e) => showToast("새로고침 실패: " + e.message)));
 $("signoutBtn").addEventListener("click", () => { clearToken(); showAuth(); showToast("로그아웃되었습니다."); });
+$("syncPriceBtn").addEventListener("click", () => refreshPrices().catch((e) => showToast("시세 갱신 실패: " + e.message)));
 $("openAddBtn").addEventListener("click", openModal);
 $("cancelAddBtn").addEventListener("click", closeModal);
 $("addForm").addEventListener("submit", submitAdd);

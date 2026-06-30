@@ -70,6 +70,14 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .up { color: var(--up); }
 .down { color: var(--down); }
 
+/* 시세 갱신 */
+.sync-row { display: flex; align-items: center; gap: 10px; margin: 12px 0 4px; }
+.sync-btn {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 9px; padding: 8px 14px; font-weight: 600; cursor: pointer; font-size: 13.5px;
+}
+.sync-btn:disabled { opacity: 0.5; cursor: default; }
+
 /* 동기화 대기 */
 .pending ul { list-style: none; padding: 0; margin: 0; }
 .pending li {

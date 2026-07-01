@@ -131,6 +131,32 @@ async function writeInbox(fileId, items) {
   }
 }
 
+// ── prices.json (폰 갱신 시세를 Drive에 반영 — inbox와 같은 폰-소유 파일) ──
+// portfolio.db 는 데스크톱 단독 작성 유지. 시세는 이 별도 파일로 오버레이/흡수. (ADR-0002)
+async function readPrices() {
+  const f = await findFile("prices.json");
+  if (!f) return null;
+  try { return await (await driveFetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`)).json(); }
+  catch { return null; }
+}
+
+async function writePrices(obj) {
+  const f = await findFile("prices.json");
+  const body = JSON.stringify(obj);
+  if (f) {
+    await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${f.id}?uploadType=media`,
+      { method: "PATCH", headers: { "Content-Type": "application/json" }, body });
+  } else {
+    const boundary = "pf" + Math.random().toString(16).slice(2);
+    const meta = { name: "prices.json", parents: ["appDataFolder"] };
+    const multipart =
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
+      `--${boundary}\r\nContent-Type: application/json\r\n\r\n${body}\r\n--${boundary}--`;
+    await driveFetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+      { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body: multipart });
+  }
+}
+
 // ── SQLite (sql.js) ─────────────────────────────────────────
 let SQL = null;
 async function openDb() {
@@ -275,7 +301,19 @@ async function loadAll() {
   renderPending(items);
   populateAddForm();     // dbMeta + 대기 종목 반영
   showData();
-  const info = $("syncInfo"); if (info) info.textContent = "";   // 이전 갱신 표시 초기화
+
+  // 저장된 폰 갱신 시세(prices.json) 오버레이 — 재실행/데스크톱 없이도 값 유지 (ADR-0002)
+  const info = $("syncInfo"); if (info) info.textContent = "";
+  try {
+    const saved = await readPrices();
+    if (saved && saved.prices) {
+      if (saved.usdkrw > 0) liveFx = saved.usdkrw;
+      for (const [id, p] of Object.entries(saved.prices)) if (p > 0) livePrices[id] = +p;
+      renderPortfolio();
+      if (info && saved.updated_at)
+        info.textContent = `저장된 시세 · ${saved.updated_at.slice(0, 16).replace("T", " ")}`;
+    }
+  } catch { /* prices.json 없으면 DB값 그대로 */ }
 }
 
 // 캐시된 포지션 + (있으면)라이브 시세/환율로 요약·보유표 재렌더. DB 재접근 없음.
@@ -344,6 +382,11 @@ async function refreshPrices() {
 
   livePrices = fresh;        // 실패 종목은 자동으로 DB값으로 폴백(renderPortfolio)
   renderPortfolio();
+
+  // Drive(prices.json)에 반영 — 폰 재실행 시 유지 + 데스크톱이 흡수해 portfolio.db 반영 (ADR-0002)
+  try {
+    await writePrices({ updated_at: new Date().toISOString(), usdkrw: liveFx || null, prices: fresh });
+  } catch { /* 기록 실패해도 화면 표시엔 지장 없음 */ }
 
   const fxTxt = liveFx ? ` · 환율 ${Math.round(liveFx).toLocaleString("ko-KR")}` : "";
   if (info) info.textContent = `${ok}종목 갱신${fail ? ` · ${fail} 실패` : ""}${fxTxt}`;

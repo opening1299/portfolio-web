@@ -201,6 +201,16 @@ function position(txs) {
 const won = (v) => "₩" + Math.round(v).toLocaleString("ko-KR");
 const pct = (v) => (v >= 0 ? "+" : "") + (v * 100).toFixed(2) + "%";
 const cls = (v) => (v > 0 ? "up" : v < 0 ? "down" : "");
+// ISO(UTC) timestamp → "MM/DD HH:mm" KST 표시
+const fmtKst = (iso) => {
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  const parts = new Intl.DateTimeFormat("ko-KR", {
+    timeZone: "Asia/Seoul", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(d).reduce((o, p) => (o[p.type] = p.value, o), {});
+  return `${parts.month}/${parts.day} ${parts.hour}:${parts.minute}`;
+};
 
 let dbMeta = { stocks: [], accounts: [] };   // 거래 추가 폼용 캐시
 let pendingItems = [];                        // 현재 입력함(inbox) 항목
@@ -311,7 +321,7 @@ async function loadAll() {
       for (const [id, p] of Object.entries(saved.prices)) if (p > 0) livePrices[id] = +p;
       renderPortfolio();
       if (info && saved.updated_at)
-        info.textContent = `저장된 시세 · ${saved.updated_at.slice(0, 16).replace("T", " ")}`;
+        info.textContent = `저장된 시세 · ${fmtKst(saved.updated_at)}`;
     }
   } catch { /* prices.json 없으면 DB값 그대로 */ }
 }

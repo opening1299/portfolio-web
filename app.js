@@ -261,6 +261,7 @@ async function loadAll() {
       const txs = query(db, "SELECT trade_type, price, quantity, fee FROM transactions WHERE stock_id=? ORDER BY trade_date, id", [s.id]);
       const pos = position(txs);
       positions.push({ id: s.id, name: s.name, code: s.code, currency: s.currency || "KRW",
+        crawlUrl: s.crawl_url || "",
         holdings: pos.holdings, avg: pos.avg, purchase: pos.purchase, realized: pos.realized, dividend: pos.dividend });
     }
     lastData = { positions, dbPrices, dbFx };
@@ -330,9 +331,12 @@ async function refreshPrices() {
   let ok = 0, fail = 0;
   await pool(held, 5, async (p) => {
     try {
-      const market = p.currency === "USD" ? "USD" : "KRW";
-      const url = `${PROXY_BASE}/price?market=${market}`
-        + `&code=${encodeURIComponent(p.code || "")}&name=${encodeURIComponent(p.name || "")}`;
+      // 네이버 금속(금 등) 커스텀 종목: crawl_url 의 /metals/<M코드> 로 판별
+      const metal = (p.crawlUrl || "").match(/\/metals\/(M\d+)/);
+      const url = metal
+        ? `${PROXY_BASE}/price?market=METAL&code=${metal[1]}`
+        : `${PROXY_BASE}/price?market=${p.currency === "USD" ? "USD" : "KRW"}`
+          + `&code=${encodeURIComponent(p.code || "")}&name=${encodeURIComponent(p.name || "")}`;
       const j = await (await fetch(url)).json();
       if (j && j.price > 0) { fresh[p.id] = j.price; ok++; } else fail++;
     } catch { fail++; }

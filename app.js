@@ -1,4 +1,5 @@
 import { GOOGLE_CLIENT_ID, DRIVE_SCOPE, SQLJS_BASE, PROXY_BASE } from "./config.js";
+import { EPS, position, initCharts, renderCharts } from "./charts.js";
 
 // ── DOM ─────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
@@ -175,27 +176,7 @@ function query(db, sql, params = []) {
   return out;
 }
 
-// ── 손익 계산 (calculator.py 이식: 평균단가법) ───────────────
-const EPS = 1e-9;
-function position(txs) {
-  let holdings = 0, avg = 0, realized = 0, dividend = 0;
-  for (const tx of txs) {
-    const price = +tx.price, qty = +tx.quantity, fee = +tx.fee, t = tx.trade_type;
-    if (t === "BUY") {
-      const total = holdings * avg + qty * price + fee;
-      holdings += qty;
-      avg = holdings ? total / holdings : 0;
-    } else if (t === "SELL") {
-      realized += (price - avg) * qty - fee;
-      holdings -= qty;
-      if (holdings < EPS) { holdings = 0; avg = 0; }
-    } else if (t === "DIVIDEND") {
-      const d = price - fee;      // 배당 = 단가(총액) − 수수료
-      dividend += d; realized += d;
-    }
-  }
-  return { holdings, avg, purchase: avg * holdings, realized, dividend };
-}
+// ── 손익 계산 — calculator.py 이식(평균단가법)은 charts.js의 position() 단일 소스 사용 ──
 
 // ── 렌더 ────────────────────────────────────────────────────
 const won = (v) => "₩" + Math.round(v).toLocaleString("ko-KR");
@@ -293,14 +274,39 @@ async function loadAll() {
 
     // 종목별 포지션을 캐시 → 시세 갱신 시 DB 재다운로드 없이 재계산
     const positions = [];
+    const txsMap = {};   // 차트(시점별 재계산)용 — trade_date 포함
     for (const s of stocks) {
-      const txs = query(db, "SELECT trade_type, price, quantity, fee FROM transactions WHERE stock_id=? ORDER BY trade_date, id", [s.id]);
+      const txs = query(db, "SELECT trade_date, trade_type, price, quantity, fee FROM transactions WHERE stock_id=? ORDER BY trade_date, id", [s.id]);
+      txsMap[s.id] = txs;
       const pos = position(txs);
       positions.push({ id: s.id, name: s.name, code: s.code, currency: s.currency || "KRW",
         crawlUrl: s.crawl_url || "",
         holdings: pos.holdings, avg: pos.avg, purchase: pos.purchase, realized: pos.realized, dividend: pos.dividend });
     }
-    lastData = { positions, dbPrices, dbFx };
+
+    // 차트 데이터 — 시세/환율 캐시 + 자산 스냅샷 (구버전 백업엔 테이블이 없을 수 있어 가드)
+    const hasTable = (name) =>
+      query(db, "SELECT name FROM sqlite_master WHERE type='table' AND name=?", [name]).length > 0;
+    const histM = {}, histD = {};
+    for (const s of stocks) { histM[s.id] = []; histD[s.id] = []; }
+    if (hasTable("price_history"))
+      for (const r of query(db, "SELECT stock_id, ym, close FROM price_history ORDER BY ym"))
+        (histM[r.stock_id] || []).push([r.ym, +r.close]);
+    if (hasTable("price_history_daily"))
+      for (const r of query(db, "SELECT stock_id, date, close FROM price_history_daily ORDER BY date"))
+        (histD[r.stock_id] || []).push([r.date, +r.close]);
+    const fxM = hasTable("fx_history")
+      ? query(db, "SELECT ym, rate FROM fx_history ORDER BY ym").map((r) => [r.ym, +r.rate]) : [];
+    const fxD = hasTable("fx_history_daily")
+      ? query(db, "SELECT date, rate FROM fx_history_daily ORDER BY date").map((r) => [r.date, +r.rate]) : [];
+    const snapshots = hasTable("daily_snapshot")
+      ? query(db, "SELECT date, total_purchase, total_eval, total_realized FROM daily_snapshot ORDER BY date") : [];
+    const chart = {
+      stocks: stocks.map((s) => ({ id: s.id, currency: s.currency || "KRW" })),
+      txsMap, histM, histD, fxM, fxD, snapshots,
+    };
+
+    lastData = { positions, dbPrices, dbFx, chart };
     livePrices = {}; liveFx = null;   // 새 DB 로드 시 라이브 오버레이 초기화
     renderPortfolio();
   } finally {
@@ -349,6 +355,9 @@ function renderPortfolio() {
   rows.sort((a, b) => b.evalKrw - a.evalKrw);
   renderSummary({ totEval, totBuy, pnl: totEval - totBuy, rate: totBuy ? (totEval - totBuy) / totBuy : 0, realized: totRealized, div: totDiv });
   renderHoldings(rows);
+  // 차트 — 현재 시점은 라이브 시세/환율 오버레이 반영 (없으면 DB값)
+  if (lastData.chart)
+    renderCharts(lastData.chart, Object.assign({}, dbPrices, livePrices), fx);
 }
 
 // ── 실시간 시세 갱신 (프록시 경유, 표시 전용 — DB/Drive 미기록) ──
@@ -551,4 +560,5 @@ if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
 }
 
-init();   // 자동 로그인 시도
+initCharts();   // 차트 토글 배선
+init();         // 자동 로그인 시도

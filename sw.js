@@ -1,6 +1,6 @@
 // 앱 셸 캐시 — 오프라인 기동/홈 화면 추가용. 데이터(Drive/sql.js CDN)는 항상 네트워크.
-const CACHE = "pf-shell-v3";
-const SHELL = ["./", "./index.html", "./style.css", "./app.js", "./config.js", "./manifest.json", "./icon.svg"];
+const CACHE = "pf-shell-v4";
+const SHELL = ["./", "./index.html", "./style.css", "./app.js", "./charts.js", "./config.js", "./manifest.json", "./icon.svg"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

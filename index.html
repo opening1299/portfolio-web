@@ -13,6 +13,8 @@
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <!-- sql.js (SQLite WASM) -->
   <script src="https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js"></script>
+  <!-- Chart.js (수익 추이 / 자산 곡선) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 </head>
 <body>
   <header>
@@ -57,6 +59,30 @@
           </thead>
           <tbody></tbody>
         </table>
+      </div>
+
+      <!-- 수익 추이 -->
+      <h2>수익 추이</h2>
+      <div class="chart-card">
+        <div class="seg" id="trendSeg">
+          <button data-mode="day" class="active">일별(90일)</button>
+          <button data-mode="month">월별</button>
+          <button data-mode="cum">누적</button>
+        </div>
+        <div class="chart-box"><canvas id="trendCanvas"></canvas></div>
+        <p id="trendHint" class="muted small" hidden></p>
+      </div>
+
+      <!-- 자산 곡선 -->
+      <h2>자산 곡선 (일별)</h2>
+      <div class="chart-card">
+        <div class="seg" id="assetSeg">
+          <button data-mode="eval" class="active">평가금액</button>
+          <button data-mode="profit">총수익</button>
+        </div>
+        <div class="chart-box"><canvas id="assetCanvas"></canvas></div>
+        <p id="assetInfo" class="muted small"></p>
+        <p id="assetHint" class="muted small" hidden></p>
       </div>
 
       <!-- 동기화 대기 -->

@@ -6,12 +6,16 @@
 
 ## 구조
 - `index.html` / `style.css` / `app.js` — 앱 본체
+- `charts.js` — 수익 추이(일별 90일/월별/누적)·자산 곡선(드로다운) 차트
+  (계산부는 데스크톱 `portfolio/history.py` 로직의 JS 이식, 렌더는 Chart.js CDN)
 - `config.js` — 웹 OAuth client_id, 스코프 (secret 없음, 공개 안전)
 - `manifest.json` / `sw.js` / `icon.svg` — PWA(홈 화면 추가)
 
 ## 동작
 1. 구글 로그인(GIS 토큰) → `drive.appdata` 권한
-2. appDataFolder에서 `portfolio.db` 다운로드 → sql.js로 읽어 **보유종목·평가손익 + 수익 요약** 표시
+2. appDataFolder에서 `portfolio.db` 다운로드 → sql.js로 읽어 **보유종목·평가손익 + 수익 요약
+   + 수익 추이·자산 곡선 차트** 표시 (차트는 백업 안의 시세 캐시·스냅샷 테이블 사용 —
+   비어 있으면 데스크톱에서 조회+백업하라는 안내 표시)
 3. "거래 추가" → `inbox.json`에 append (DB는 안 건드림)
 4. 데스크톱 앱이 시작/동기화 시 inbox를 흡수해 실제 DB에 반영 (충돌 없음)
 

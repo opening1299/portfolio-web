@@ -90,7 +90,9 @@ async function driveFetch(url, opts = {}) {
   }
   if (!r.ok && r.status !== 404) {
     const txt = await r.text().catch(() => "");
-    throw new Error(`Drive ${r.status}: ${txt.slice(0, 200)}`);
+    const err = new Error(`Drive ${r.status}: ${txt.slice(0, 200)}`);
+    err.status = r.status;   // 호출부가 인증 오류(401/403)와 그 외를 구분할 수 있게
+    throw err;
   }
   return r;
 }
@@ -375,7 +377,16 @@ async function refreshPrices() {
   const btn = $("syncPriceBtn"), info = $("syncInfo");
   if (btn) btn.disabled = true;
   if (info) info.textContent = "시세 갱신 중…";
+  try {
+    await runPriceRefresh(info);
+  } finally {
+    // 중간에 예외가 나도 플래그/버튼을 반드시 되돌린다 (안 그러면 영구 잠김)
+    if (btn) btn.disabled = false;
+    syncing = false;
+  }
+}
 
+async function runPriceRefresh(info) {
   // 환율 먼저 (해외주식 환산 반영)
   try {
     const j = await (await fetch(`${PROXY_BASE}/fx`)).json();
@@ -399,18 +410,18 @@ async function refreshPrices() {
     } catch { fail++; }
   });
 
-  livePrices = fresh;        // 실패 종목은 자동으로 DB값으로 폴백(renderPortfolio)
+  // 이번에 실패한 종목은 직전에 받아 둔 값을 유지한다. 통째로 교체하면 prices.json에
+  // 저장돼 있던 성공분까지 지워져, 부분 실패마다 폰의 시세 영속(ADR-0002)이 깎인다.
+  livePrices = Object.assign({}, livePrices, fresh);
   renderPortfolio();
 
   // Drive(prices.json)에 반영 — 폰 재실행 시 유지 + 데스크톱이 흡수해 portfolio.db 반영 (ADR-0002)
   try {
-    await writePrices({ updated_at: new Date().toISOString(), usdkrw: liveFx || null, prices: fresh });
+    await writePrices({ updated_at: new Date().toISOString(), usdkrw: liveFx || null, prices: livePrices });
   } catch { /* 기록 실패해도 화면 표시엔 지장 없음 */ }
 
   const fxTxt = liveFx ? ` · 환율 ${Math.round(liveFx).toLocaleString("ko-KR")}` : "";
   if (info) info.textContent = `${ok}종목 갱신${fail ? ` · ${fail} 실패` : ""}${fxTxt}`;
-  if (btn) btn.disabled = false;
-  syncing = false;
 }
 
 // ── 거래 / 종목 추가 ────────────────────────────────────────
@@ -519,8 +530,15 @@ async function init() {
     try {
       await loadAll();   // 유효 토큰으로 바로 진입 (구글 호출 없음)
       return;
-    } catch {
-      clearToken();      // 만료/무효였으면 캐시 비우고 silent 재시도로 폴백
+    } catch (e) {
+      // 인증 문제일 때만 캐시를 비우고 재로그인. 그 외(백업 없음·네트워크 등)는
+      // 로그인 화면으로 밀어내면 실제 원인이 사라지므로 메시지를 그대로 보여준다.
+      if (!e || (e.status !== 401 && e.status !== 403)) {
+        showAuth();
+        showToast("불러오기 실패: " + ((e && e.message) || e));
+        return;
+      }
+      clearToken();
     }
   }
   try {

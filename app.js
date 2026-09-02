@@ -7,7 +7,21 @@ const authView = $("authView"), statusView = $("statusView"), dataView = $("data
 const statusMsg = $("statusMsg"), toast = $("toast");
 
 // ── 인증 (Google Identity Services 토큰 플로) ────────────────
-let accessToken = null, tokenClient = null, tokenResolve = null, tokenReject = null;
+let accessToken = null, tokenExp = 0;
+let tokenClient = null, tokenResolve = null, tokenReject = null, tokenTimer = null;
+
+// GIS 팝업은 standalone PWA 에서 opener 연결이 끊기면 callback·error_callback 이
+// 둘 다 오지 않는다 → 타임아웃으로 끊지 않으면 promise 가 영구 pending 이 된다.
+const AUTH_TIMEOUT_MS = 20 * 1000;          // 버튼 로그인 — 사용자가 계정을 고르는 중일 수 있음
+const AUTH_SILENT_TIMEOUT_MS = 8 * 1000;    // 무음 재인증 — 막히면 빨리 포기하고 로그인 화면으로
+const SESSION_EXPIRED_MSG = "세션이 만료되었습니다. 다시 로그인해 주세요.";
+
+// 인증 실패는 status=401 로 통일 → 호출부가 "불러오기 실패" 가 아니라 "세션 만료" 로 안내한다.
+function authError(msg) {
+  const e = new Error(msg || "로그인 실패");
+  e.status = 401;
+  return e;
+}
 
 // 단기(≈1시간) 액세스 토큰을 localStorage에 캐시 → 새로고침/재실행 시 재로그인 회피.
 // 리프레시 토큰은 저장하지 않음(브라우저 토큰 플로엔 존재하지 않음).
@@ -18,8 +32,9 @@ function saveToken(resp) {
   if (!resp || !resp.access_token) return;
   accessToken = resp.access_token;
   const ttl = (parseInt(resp.expires_in, 10) || 3600) * 1000;
+  tokenExp = Date.now() + ttl;
   try {
-    localStorage.setItem(TOKEN_KEY, JSON.stringify({ t: accessToken, exp: Date.now() + ttl }));
+    localStorage.setItem(TOKEN_KEY, JSON.stringify({ t: accessToken, exp: tokenExp }));
   } catch { /* 저장 실패는 무시 (세션 토큰으로 동작) */ }
 }
 
@@ -28,13 +43,19 @@ function loadCachedToken() {
     const raw = localStorage.getItem(TOKEN_KEY);
     if (!raw) return null;
     const { t, exp } = JSON.parse(raw);
-    if (t && exp && Date.now() < exp - TOKEN_SKEW_MS) return t;
+    if (t && exp && Date.now() < exp - TOKEN_SKEW_MS) { tokenExp = exp; return t; }
   } catch { /* 손상된 캐시 무시 */ }
   return null;
 }
 
+// 메모리 기준 유효성 — localStorage 저장이 막힌 브라우저에서도 정확하다.
+function tokenAlive() {
+  return !!accessToken && Date.now() < tokenExp - TOKEN_SKEW_MS;
+}
+
 function clearToken() {
   accessToken = null;
+  tokenExp = 0;
   try { localStorage.removeItem(TOKEN_KEY); } catch { /* ignore */ }
 }
 
@@ -57,34 +78,52 @@ function ensureTokenClient() {
     scope: DRIVE_SCOPE,
     callback: (resp) => {
       if (resp && resp.access_token) saveToken(resp);
-      const r = tokenResolve; tokenResolve = tokenReject = null;
+      const r = tokenResolve; clearTokenWaiters();
       if (r) r(resp);
     },
     error_callback: (err) => {     // 세션 없음/미동의/팝업 차단 등 → 조용히 실패
-      const rj = tokenReject; tokenResolve = tokenReject = null;
-      if (rj) rj(err || new Error("로그인 실패"));
+      const rj = tokenReject; clearTokenWaiters();
+      if (rj) rj(authError((err && (err.message || err.type)) || "로그인 실패"));
     },
   });
 }
 
-function requestToken(interactive) {
+function clearTokenWaiters() {
+  tokenResolve = tokenReject = null;
+  if (tokenTimer) { clearTimeout(tokenTimer); tokenTimer = null; }
+}
+
+// prompt 는 항상 '' — 세션이 살아있고 이미 동의했으면 UI 없이, 아니면 계정 선택만 뜼다.
+// 'consent' 는 이미 동의한 사용자에게도 동의 화면을 매번 처음부터 다시 태우므로 쓰지 않는다.
+function requestToken(timeoutMs = AUTH_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     try {
       ensureTokenClient();
+      clearTokenWaiters();          // 앞선 요청이 남아있으면 버린다 (슬롯은 하나)
       tokenResolve = resolve; tokenReject = reject;
-      // 비대화식('')은 세션이 살아있고 이미 동의했으면 UI 없이 토큰 반환
-      tokenClient.requestAccessToken({ prompt: interactive ? "consent" : "" });
-    } catch (e) { reject(e); }
+      tokenTimer = setTimeout(() => {
+        const rj = tokenReject; clearTokenWaiters();
+        if (rj) rj(authError("로그인 응답이 없습니다."));
+      }, timeoutMs);
+      tokenClient.requestAccessToken({ prompt: "" });
+    } catch (e) { clearTokenWaiters(); reject(e); }
   });
 }
 
-// ── Drive REST (fetch + Bearer, 401 시 토큰 재요청 1회) ──────
+// ── Drive REST (fetch + Bearer, 401 시 무음 토큰 재요청 1회) ──
+// 무음 재요청이 실패하면 status=401 을 던져 호출부가 "세션 만료" 로 안내하게 한다.
+async function ensureToken(timeoutMs) {
+  await requestToken(timeoutMs);
+  if (!accessToken) throw authError(SESSION_EXPIRED_MSG);
+}
+
 async function driveFetch(url, opts = {}) {
-  if (!accessToken) await requestToken(false);
+  if (!accessToken) await ensureToken(AUTH_SILENT_TIMEOUT_MS);
   const headers = Object.assign({}, opts.headers, { Authorization: "Bearer " + accessToken });
   let r = await fetch(url, Object.assign({}, opts, { headers }));
   if (r.status === 401) {
-    await requestToken(false);
+    clearToken();                 // 서버가 거부한 토큰은 캐시에도 남기지 않는다
+    await ensureToken(AUTH_SILENT_TIMEOUT_MS);
     headers.Authorization = "Bearer " + accessToken;
     r = await fetch(url, Object.assign({}, opts, { headers }));
   }
@@ -513,7 +552,7 @@ function closeStockModal() { $("stockModal").hidden = true; }
 async function signIn() {
   try {
     showStatus("구글 로그인 중…");
-    await requestToken(true);
+    await requestToken();          // 제스처 안 — 팝업이 막히지 않는 유일한 지점
     if (!accessToken) { showAuth(); showToast("로그인이 취소되었습니다."); return; }
     await loadAll();
   } catch (e) {
@@ -538,17 +577,23 @@ async function init() {
         showToast("불러오기 실패: " + ((e && e.message) || e));
         return;
       }
+      // driveFetch 가 이미 무음 갱신을 시도하고 실패한 뒤다 → 또 기다리게 하지 않는다.
       clearToken();
+      showAuth();
+      showToast(SESSION_EXPIRED_MSG);
+      return;
     }
   }
   try {
     await waitForGoogle();
     showStatus("로그인 확인 중…");
-    await requestToken(false);
-    if (accessToken) { await loadAll(); return; }
-    showAuth();
+    await requestToken(AUTH_SILENT_TIMEOUT_MS);
+    if (!accessToken) { showAuth(); showToast(SESSION_EXPIRED_MSG); return; }
+    await loadAll();
   } catch (e) {
-    showAuth();   // 세션 없음/미동의 → 로그인 버튼 표시
+    // 무음 재인증 실패(세션 없음·팝업 차단·응답 없음)는 정상 경로 — 로그인 버튼 1회로 복구
+    showAuth();
+    showToast(e && e.status === 401 ? SESSION_EXPIRED_MSG : "오류: " + ((e && e.message) || e));
   }
 }
 
@@ -571,6 +616,15 @@ document.querySelector('#addForm [name=trade_type]').addEventListener("change", 
 });
 document.querySelector('#stockForm [name=tab]').addEventListener("change", (e) => {
   $("ccyHint").textContent = e.target.value === "해외주식" ? "통화: USD (해외주식)" : "통화: KRW";
+});
+
+// 앱 복귀 시: 토큰이 이미 죽었으면 버튼을 눌렀다가 실패하기 전에 미리 로그인 화면으로.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  if (dataView.hidden || tokenAlive()) return;
+  clearToken();
+  showAuth();
+  showToast(SESSION_EXPIRED_MSG);
 });
 
 // 서비스워커 등록 (홈 화면 추가 / 오프라인 셸)

@@ -20,6 +20,11 @@ export function position(txs) {
     } else if (t === "DIVIDEND") {
       const d = price - fee;      // 배당 = 단가(총액) − 수수료
       dividend += d; realized += d;
+    } else if (t === "REINVEST") {
+      // 펀드 결산 재투자 — 원가(매입금액) 그대로, 보유수만 증가 → 평단가 희석
+      const total = holdings * avg;
+      holdings += qty;
+      avg = holdings ? total / holdings : 0;
     }
   }
   return { holdings, avg, purchase: avg * holdings, realized, dividend };

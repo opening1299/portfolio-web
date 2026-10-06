@@ -286,7 +286,7 @@ function renderPending(items) {
   if (!items.length) { box.hidden = true; return; }
   box.hidden = false;
   $("pendingCount").textContent = items.length;
-  const tk = { BUY: "매수", SELL: "매도", DIVIDEND: "배당" };
+  const tk = { BUY: "매수", SELL: "매도", DIVIDEND: "배당", REINVEST: "재투자" };
   const txName = (it) => {
     if (it.stock_id) { const s = dbMeta.stocks.find((x) => x.id === it.stock_id); if (s) return s.name; }
     return it.code || `#${it.stock_id || "?"}`;

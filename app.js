@@ -1,8 +1,11 @@
 import { GOOGLE_CLIENT_ID, DRIVE_SCOPE, SQLJS_BASE, PROXY_BASE } from "./config.js";
-import { EPS, position, initCharts, renderCharts } from "./charts.js";
+import { EPS, position, isoDate, initCharts, renderCharts } from "./charts.js";
 
 // ── DOM ─────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
+// DB/입력함의 문자열은 HTML 문법으로 해석하지 않는다.
+const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g,
+  (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
 const authView = $("authView"), statusView = $("statusView"), dataView = $("dataView");
 const statusMsg = $("statusMsg"), toast = $("toast");
 
@@ -272,7 +275,7 @@ function renderHoldings(rows) {
   const fmt = (v, cur) => (cur === "USD" ? "$" + v.toFixed(2) : Math.round(v).toLocaleString("ko-KR"));
   tb.innerHTML = rows.map((r) => `
     <tr>
-      <td>${r.name}</td>
+      <td>${escapeHtml(r.name)}</td>
       <td class="num">${(+r.qty).toLocaleString("ko-KR")}</td>
       <td class="num">${fmt(r.avg, r.cur)}</td>
       <td class="num">${fmt(r.cp, r.cur)}</td>
@@ -293,9 +296,9 @@ function renderPending(items) {
   };
   $("pendingList").innerHTML = items.map((it) => {
     if (it.kind === "stock")
-      return `<li>📌 종목 추가 · ${it.name} (${it.code}) · ${it.tab}</li>`;
-    return `<li>${it.trade_date} · ${txName(it)} · <b>${tk[it.trade_type] || it.trade_type}</b>
-      ${it.quantity ? ` ${it.quantity}주` : ""} @ ${(+it.price).toLocaleString("ko-KR")}</li>`;
+      return `<li>📌 종목 추가 · ${escapeHtml(it.name)} (${escapeHtml(it.code)}) · ${escapeHtml(it.tab)}</li>`;
+    return `<li>${escapeHtml(it.trade_date)} · ${escapeHtml(txName(it))} · <b>${escapeHtml(tk[it.trade_type] || it.trade_type)}</b>
+      ${it.quantity ? ` ${escapeHtml(it.quantity)}주` : ""} @ ${(+it.price).toLocaleString("ko-KR")}</li>`;
   }).join("");
 }
 
@@ -315,13 +318,14 @@ async function loadAll() {
 
     // 종목별 포지션을 캐시 → 시세 갱신 시 DB 재다운로드 없이 재계산
     const positions = [];
-    const txsMap = {};   // 차트(시점별 재계산)용 — trade_date 포함
+    const txsMap = Object.fromEntries(stocks.map((s) => [s.id, []]));
+    for (const tx of query(db, "SELECT stock_id, trade_date, trade_type, price, quantity, fee FROM transactions ORDER BY trade_date, id"))
+      txsMap[tx.stock_id]?.push(tx);
     for (const s of stocks) {
-      const txs = query(db, "SELECT trade_date, trade_type, price, quantity, fee FROM transactions WHERE stock_id=? ORDER BY trade_date, id", [s.id]);
-      txsMap[s.id] = txs;
+      const txs = txsMap[s.id];
       const pos = position(txs);
       positions.push({ id: s.id, name: s.name, code: s.code, currency: s.currency || "KRW",
-        crawlUrl: s.crawl_url || "",
+        tab: s.tab, crawlUrl: s.crawl_url || "",
         holdings: pos.holdings, avg: pos.avg, purchase: pos.purchase, realized: pos.realized, dividend: pos.dividend });
     }
 
@@ -401,7 +405,7 @@ function renderPortfolio() {
     renderCharts(lastData.chart, Object.assign({}, dbPrices, livePrices), fx);
 }
 
-// ── 실시간 시세 갱신 (프록시 경유, 표시 전용 — DB/Drive 미기록) ──
+// ── 실시간 시세 갱신 (프록시 조회 + Drive 오버레이 저장) ──
 // 동시성 제한 풀: items 를 limit 개씩만 병렬로 fn 실행
 async function pool(items, limit, fn) {
   let i = 0;
@@ -428,7 +432,7 @@ async function refreshPrices() {
 async function runPriceRefresh(info) {
   // 환율 먼저 (해외주식 환산 반영)
   try {
-    const j = await (await fetch(`${PROXY_BASE}/fx`)).json();
+    const j = await (await fetch(`${PROXY_BASE}/fx`, { signal: AbortSignal.timeout(25000) })).json();
     if (j && j.usdkrw > 0) liveFx = j.usdkrw;
   } catch { /* 실패 시 DB 환율 유지 */ }
 
@@ -442,9 +446,9 @@ async function runPriceRefresh(info) {
       const metal = (p.crawlUrl || "").match(/\/metals\/(M\d+)/);
       const url = metal
         ? `${PROXY_BASE}/price?market=METAL&code=${metal[1]}`
-        : `${PROXY_BASE}/price?market=${p.currency === "USD" ? "USD" : "KRW"}`
+        : `${PROXY_BASE}/price?market=${p.tab === "펀드" ? "FUND" : (p.currency === "USD" ? "USD" : "KRW")}`
           + `&code=${encodeURIComponent(p.code || "")}&name=${encodeURIComponent(p.name || "")}`;
-      const j = await (await fetch(url)).json();
+      const j = await (await fetch(url, { signal: AbortSignal.timeout(60000) })).json();
       if (j && j.price > 0) { fresh[p.id] = j.price; ok++; } else fail++;
     } catch { fail++; }
   });
@@ -468,22 +472,27 @@ function populateAddForm() {
   const ssel = document.querySelector('#addForm [name=stock_id]');
   const asel = document.querySelector('#addForm [name=account_id]');
   // 기존 종목(id로 참조) + 입력함 대기 종목(code|tab으로 참조)
-  const existing = dbMeta.stocks.map((s) => `<option value="id:${s.id}">${s.name} (${s.code})</option>`);
+  const existing = dbMeta.stocks.map((s) => `<option value="id:${s.id}">${escapeHtml(s.name)} (${escapeHtml(s.code)})</option>`);
   const pend = pendingItems.filter((it) => it.kind === "stock").map((it) =>
-    `<option value="ct:${encodeURIComponent(it.code)}|${encodeURIComponent(it.tab || "국내주식")}">${it.name} (${it.code}) · 대기</option>`);
+    `<option value="ct:${encodeURIComponent(it.code)}|${encodeURIComponent(it.tab || "국내주식")}">${escapeHtml(it.name)} (${escapeHtml(it.code)}) · 대기</option>`);
   ssel.innerHTML = existing.concat(pend).join("") || `<option value="">(종목 없음 — 먼저 종목 추가)</option>`;
-  asel.innerHTML = dbMeta.accounts.map((a) => `<option value="${a.id}">${a.name}</option>`).join("");
+  asel.innerHTML = dbMeta.accounts.map((a) => `<option value="${a.id}">${escapeHtml(a.name)}</option>`).join("");
   const dEl = document.querySelector('#addForm [name=trade_date]');
-  if (!dEl.value) dEl.value = new Date().toISOString().slice(0, 10);
+  if (!dEl.value) dEl.value = isoDate(new Date());
 }
 
+let inboxWriting = false;
 async function pushInbox(item) {
+  if (inboxWriting) throw new Error("이전 입력을 저장 중입니다. 잠시 후 다시 시도하세요.");
+  inboxWriting = true;
+  try {
   const { fileId, items } = await readInbox();
   items.push(item);
   await writeInbox(fileId, items);
   pendingItems = items;
   renderPending(items);
   populateAddForm();   // 새 대기 종목을 거래 폼에 즉시 반영
+  } finally { inboxWriting = false; }
 }
 
 async function submitAdd(e) {

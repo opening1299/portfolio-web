@@ -104,7 +104,7 @@ export function monthlySeries(cd, curPrices, curFx, today = new Date()) {
   const curYm = monthKey(today);
   const months = iterMonths(first.slice(0, 7), curYm);
   const result = months.map((ym) => {
-    const pt = totalsAt(cd, curPrices, curFx, monthEndIso(ym), ym, ym === curYm, false);
+    const pt = totalsAt(cd, curPrices, curFx, ym === curYm ? isoDate(today) : monthEndIso(ym), ym, ym === curYm, false);
     pt.label = ym;
     return pt;
   });

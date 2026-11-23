@@ -5,9 +5,10 @@
 export const EPS = 1e-9;
 
 // ── calculator.py 이식: 평균단가법 포지션 (app.js에서도 재사용) ──
-export function position(txs) {
-  let holdings = 0, avg = 0, realized = 0, dividend = 0;
-  for (const tx of txs) {
+export function position(txs, previous = {}, start = 0, end = txs.length) {
+  let { holdings = 0, avg = 0, realized = 0, dividend = 0 } = previous;
+  for (let index = start; index < end; index++) {
+    const tx = txs[index];
     const price = +tx.price, qty = +tx.quantity, fee = +tx.fee, t = tx.trade_type;
     if (t === "BUY") {
       const total = holdings * avg + qty * price + fee;
@@ -33,9 +34,13 @@ export function position(txs) {
 // ── 순수 계산 (history.py 이식) ─────────────────────────────
 // pairs=[[key, value]...] 오름차순에서 key<=k 인 마지막 value (carry-forward)
 export function asof(pairs, k) {
-  let val = null;
-  for (const [pk, v] of pairs) { if (pk <= k) val = v; else break; }
-  return val;
+  let lo = 0, hi = pairs.length;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (pairs[mid][0] <= k) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo ? pairs[lo - 1][1] : null;
 }
 
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -55,15 +60,19 @@ function iterMonths(startYm, endYm) {
 
 // 한 시점의 {profit, pct, purchase, eval} — history._totals_at 이식.
 // cd: {stocks:[{id,currency}], txsMap, histM, histD, fxM, fxD}
-export function totalsAt(cd, curPrices, curFx, cutoffIso, asofKey, isCur, daily) {
+export function totalsAt(cd, curPrices, curFx, cutoffIso, asofKey, isCur, daily, cursors = new Map()) {
   const hist = daily ? cd.histD : cd.histM;
   const fxHist = daily ? cd.fxD : cd.fxM;
   const fxRate = isCur ? curFx : (asof(fxHist, asofKey) ?? curFx);
   let purchase = 0, profit = 0, evalSum = 0;
   for (const s of cd.stocks) {
-    const sub = (cd.txsMap[s.id] || []).filter((t) => (t.trade_date || "").slice(0, 10) <= cutoffIso);
-    if (!sub.length) continue;
-    const pos = position(sub);
+    const txs = cd.txsMap[s.id] || [];
+    const cursor = cursors.get(s.id) || { index: 0, pos: {} };
+    let end = cursor.index;
+    while (end < txs.length && txs[end].trade_date.slice(0, 10) <= cutoffIso) end++;
+    if (!end) continue;
+    const pos = position(txs, cursor.pos, cursor.index, end);
+    cursors.set(s.id, { index: end, pos });
     let px = isCur ? +(curPrices[s.id] || 0) : asof(hist[s.id] || [], asofKey);
     if (!px) px = pos.avg;   // 시세 없음 → 평가손익 0 처리
     const conv = s.currency === "USD" ? fxRate : 1.0;
@@ -103,8 +112,9 @@ export function monthlySeries(cd, curPrices, curFx, today = new Date()) {
   if (!first) return [];
   const curYm = monthKey(today);
   const months = iterMonths(first.slice(0, 7), curYm);
+  const cursors = new Map();
   const result = months.map((ym) => {
-    const pt = totalsAt(cd, curPrices, curFx, ym === curYm ? isoDate(today) : monthEndIso(ym), ym, ym === curYm, false);
+    const pt = totalsAt(cd, curPrices, curFx, ym === curYm ? isoDate(today) : monthEndIso(ym), ym, ym === curYm, false, cursors);
     pt.label = ym;
     return pt;
   });
@@ -123,9 +133,10 @@ export function dailySeries(cd, curPrices, curFx, days = 90, today = new Date())
   if (hasBaseline) d.setDate(d.getDate() - 1);
 
   const result = [];
+  const cursors = new Map();
   while (isoDate(d) <= todayIso) {
     const iso = isoDate(d);
-    const pt = totalsAt(cd, curPrices, curFx, iso, iso, iso === todayIso, true);
+    const pt = totalsAt(cd, curPrices, curFx, iso, iso, iso === todayIso, true, cursors);
     pt.label = iso;
     result.push(pt);
     d.setDate(d.getDate() + 1);

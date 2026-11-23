@@ -139,11 +139,21 @@ async function driveFetch(url, opts = {}) {
   return r;
 }
 
+async function listFiles(name) {
+  const params = new URLSearchParams({ spaces: "appDataFolder", q: "name='" + name + "' and trashed=false",
+    fields: "nextPageToken,files(id,modifiedTime,appProperties)", orderBy: "modifiedTime desc", pageSize: "100" });
+  const files = [];
+  do {
+    const data = await (await driveFetch("https://www.googleapis.com/drive/v3/files?" + params)).json();
+    files.push(...data.files);
+    if (!data.nextPageToken) break;
+    params.set("pageToken", data.nextPageToken);
+  } while (true);
+  return files;
+}
+
 async function findFile(name) {
-  const q = encodeURIComponent(`name='${name}'`);
-  const url = `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${q}&fields=files(id,modifiedTime)`;
-  const j = await (await driveFetch(url)).json();
-  return (j.files && j.files[0]) || null;
+  return (await listFiles(name))[0] || null;
 }
 
 async function downloadBytes(id) {
@@ -160,52 +170,76 @@ async function readInbox() {
   } catch { return { fileId: f.id, items: [] }; }
 }
 
-async function writeInbox(fileId, items) {
-  const body = JSON.stringify({ items });
-  if (fileId) {
-    await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,
-      { method: "PATCH", headers: { "Content-Type": "application/json" }, body });
-  } else {
-    const boundary = "pf" + Math.random().toString(16).slice(2);
-    const meta = { name: "inbox.json", parents: ["appDataFolder"] };
-    const multipart =
-      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
-      `--${boundary}\r\nContent-Type: application/json\r\n\r\n${body}\r\n--${boundary}--`;
-    await driveFetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
-      { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body: multipart });
-  }
+async function createJson(name, record, id) {
+  const boundary = "pf" + crypto.randomUUID();
+  const meta = { name, parents: ["appDataFolder"], ...(id && {id}) };
+  const body = "--" + boundary + "\r\nContent-Type: application/json\r\n\r\n" + JSON.stringify(meta)
+    + "\r\n--" + boundary + "\r\nContent-Type: application/json\r\n\r\n" + JSON.stringify(record)
+    + "\r\n--" + boundary + "--";
+  return driveFetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart", {
+    method: "POST", headers: { "Content-Type": "multipart/related; boundary=" + boundary }, body });
+}
+
+let backupRoot = null;
+let appliedIds = new Set();
+let rejectedIds = new Set();
+async function readJson(id) {
+  const r = await driveFetch("https://www.googleapis.com/drive/v3/files/" + id + "?alt=media");
+  return r.status === 404 ? null : r.json();
 }
 
 // ── prices.json (폰 갱신 시세를 Drive에 반영 — inbox와 같은 폰-소유 파일) ──
 // portfolio.db 는 데스크톱 단독 작성 유지. 시세는 이 별도 파일로 오버레이/흡수. (ADR-0002)
-async function readPrices() {
-  const f = await findFile("prices.json");
-  if (!f) return null;
-  try { return await (await driveFetch(`https://www.googleapis.com/drive/v3/files/${f.id}?alt=media`)).json(); }
-  catch { return null; }
+async function readPrices(name = "portfolio-v2-prices.json") {
+  const file = await findFile(name);
+  return file && readJson(file.id);
 }
 
 async function writePrices(obj) {
-  const f = await findFile("prices.json");
-  const body = JSON.stringify(obj);
-  if (f) {
-    await driveFetch(`https://www.googleapis.com/upload/drive/v3/files/${f.id}?uploadType=media`,
-      { method: "PATCH", headers: { "Content-Type": "application/json" }, body });
-  } else {
-    const boundary = "pf" + Math.random().toString(16).slice(2);
-    const meta = { name: "prices.json", parents: ["appDataFolder"] };
-    const multipart =
-      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n` +
-      `--${boundary}\r\nContent-Type: application/json\r\n\r\n${body}\r\n--${boundary}--`;
-    await driveFetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
-      { method: "POST", headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, body: multipart });
-  }
+  const name = "portfolio-v2-prices.json";
+  const file = await findFile(name);
+  if (!file) return createJson(name, obj);
+  const r = await driveFetch("https://www.googleapis.com/upload/drive/v3/files/" + file.id + "?uploadType=media",
+    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(obj) });
+  if (!r.ok) throw new Error("시세 파일을 저장할 수 없습니다.");
 }
 
 // ── SQLite (sql.js) ─────────────────────────────────────────
 let SQL = null;
 async function openDb() {
   if (!SQL) SQL = await initSqlJs({ locateFile: (f) => SQLJS_BASE + f });
+  const roots = await listFiles("portfolio-v2-root.json");
+  backupRoot = roots[0]?.id || null;
+  if (roots.length > 1) {
+    const anchor = roots.reduce((a, b) => a.id < b.id ? a : b);
+    const slot = (await readJson(anchor.id))?.choice;
+    const decision = slot && await readJson(slot);
+    backupRoot = decision?.portfolioRoot || anchor.appProperties?.portfolioRoot;
+    if (!roots.some(root => root.id === backupRoot)) throw new Error("PC에서 기준 백업을 선택하세요.");
+  }
+  if (backupRoot) {
+    const cacheKey = "portfolio-head-" + backupRoot;
+    let fid = sessionStorage.getItem(cacheKey) || backupRoot;
+    let record = await readJson(fid);
+    const seen = new Set();
+    while (record) {
+      if (seen.has(fid)) throw new Error("백업 연결 기록이 손상되었습니다.");
+      seen.add(fid);
+      const child = await readJson(record.next);
+      if (!child) break;
+      if (child.parent !== fid) throw new Error("백업 버전이 일치하지 않습니다.");
+      fid = record.next;
+      record = child;
+    }
+    if (record?.db) {
+      const bytes = await downloadBytes(record.db);
+      const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+      const hash = Array.from(digest, b => b.toString(16).padStart(2, "0")).join("");
+      if (hash !== record.sha256) throw new Error("백업 파일 검증에 실패했습니다.");
+      sessionStorage.setItem(cacheKey, fid);
+      return new SQL.Database(bytes);
+    }
+  }
   const f = await findFile("portfolio.db");
   if (!f) throw new Error("드라이브에 백업(portfolio.db)이 없습니다.\n데스크톱 앱에서 먼저 '구글 드라이브 백업'을 실행하세요.");
   return new SQL.Database(await downloadBytes(f.id));
@@ -242,6 +276,8 @@ let pendingItems = [];                        // 현재 입력함(inbox) 항목
 // DB 로드 결과 캐시(재계산용) + 라이브 시세 오버레이. 시세 갱신 시 DB 재다운로드 없이 재렌더.
 let lastData = null;        // { positions:[{id,name,code,currency,holdings,avg,purchase,realized,dividend}], dbPrices, dbFx }
 let livePrices = {};        // { stock_id: 실시간가 } — 프록시로 갱신, 없으면 DB값 사용
+let quoteRecords = {};
+let fxRecord = null;
 let liveFx = null;          // 실시간 USD/KRW, 없으면 DB값 사용
 const genId = () => (crypto.randomUUID ? crypto.randomUUID() : "id" + Date.now() + Math.random());
 
@@ -297,7 +333,7 @@ function renderPending(items) {
   $("pendingList").innerHTML = items.map((it) => {
     if (it.kind === "stock")
       return `<li>📌 종목 추가 · ${escapeHtml(it.name)} (${escapeHtml(it.code)}) · ${escapeHtml(it.tab)}</li>`;
-    return `<li>${escapeHtml(it.trade_date)} · ${escapeHtml(txName(it))} · <b>${escapeHtml(tk[it.trade_type] || it.trade_type)}</b>
+    return `<li>${rejectedIds.has(it.id) ? "입력 오류 · " : ""}${escapeHtml(it.trade_date)} · ${escapeHtml(txName(it))} · <b>${escapeHtml(tk[it.trade_type] || it.trade_type)}</b>
       ${it.quantity ? ` ${escapeHtml(it.quantity)}주` : ""} @ ${(+it.price).toLocaleString("ko-KR")}</li>`;
   }).join("");
 }
@@ -313,13 +349,19 @@ async function loadAll() {
     const accounts = query(db, "SELECT id, name FROM accounts ORDER BY sort_order, name");
     dbMeta = { stocks, accounts };
 
+    appliedIds = new Set(JSON.parse(query(db, "SELECT value FROM settings WHERE key=\x27gdrive_inbox_applied\x27")[0]?.value || "[]"));
+    const dbStamps = {};
+    const dbFxStamp = query(db, "SELECT value FROM settings WHERE key=\x27usd_krw_updated_at\x27")[0]?.value;
     const dbPrices = {};
-    for (const p of query(db, "SELECT stock_id, current_price FROM prices")) dbPrices[p.stock_id] = +p.current_price;
+    for (const p of query(db, "SELECT stock_id, current_price, updated_at FROM prices")) {
+      dbPrices[p.stock_id] = +p.current_price;
+      dbStamps[p.stock_id] = p.updated_at;
+    }
 
     // 종목별 포지션을 캐시 → 시세 갱신 시 DB 재다운로드 없이 재계산
     const positions = [];
     const txsMap = Object.fromEntries(stocks.map((s) => [s.id, []]));
-    for (const tx of query(db, "SELECT stock_id, trade_date, trade_type, price, quantity, fee FROM transactions ORDER BY trade_date, id"))
+    for (const tx of query(db, "SELECT stock_id, account_id, trade_date, trade_type, price, quantity, fee FROM transactions ORDER BY trade_date, id"))
       txsMap[tx.stock_id]?.push(tx);
     for (const s of stocks) {
       const txs = txsMap[s.id];
@@ -332,6 +374,7 @@ async function loadAll() {
     // 차트 데이터 — 시세/환율 캐시 + 자산 스냅샷 (구버전 백업엔 테이블이 없을 수 있어 가드)
     const hasTable = (name) =>
       query(db, "SELECT name FROM sqlite_master WHERE type='table' AND name=?", [name]).length > 0;
+    rejectedIds = new Set(hasTable("phone_inputs") ? query(db, "SELECT id FROM phone_inputs WHERE outcome=\x27invalid\x27").map(x => x.id) : []);
     const histM = {}, histD = {};
     for (const s of stocks) { histM[s.id] = []; histD[s.id] = []; }
     if (hasTable("price_history"))
@@ -351,25 +394,41 @@ async function loadAll() {
       txsMap, histM, histD, fxM, fxD, snapshots,
     };
 
-    lastData = { positions, dbPrices, dbFx, chart };
+    lastData = { positions, dbPrices, dbStamps, dbFxStamp, dbFx, chart };
+    quoteRecords = {}; fxRecord = null;
     livePrices = {}; liveFx = null;   // 새 DB 로드 시 라이브 오버레이 초기화
     renderPortfolio();
   } finally {
     db.close();
   }
   const { items } = await readInbox();
-  pendingItems = items;
-  renderPending(items);
+  const files = await listFiles("portfolio-v2-input.json");
+  for (const file of files) {
+    if (!appliedIds.has(file.id) || rejectedIds.has(file.id)) {
+      const item = await readJson(file.id);
+      if (item) items.push({ ...item, id: file.id });
+    }
+  }
+  pendingItems = items.filter(it => !appliedIds.has(it.id) || rejectedIds.has(it.id));
+  renderPending(pendingItems);
   populateAddForm();     // dbMeta + 대기 종목 반영
   showData();
 
   // 저장된 폰 갱신 시세(prices.json) 오버레이 — 재실행/데스크톱 없이도 값 유지 (ADR-0002)
   const info = $("syncInfo"); if (info) info.textContent = "";
   try {
-    const saved = await readPrices();
+    const saved = await readPrices() || await readPrices("prices.json");
     if (saved && saved.prices) {
-      if (saved.usdkrw > 0) liveFx = saved.usdkrw;
-      for (const [id, p] of Object.entries(saved.prices)) if (p > 0) livePrices[id] = +p;
+      if (saved.fx?.value > 0 && Date.parse(saved.fx.at) > (Date.parse(lastData.dbFxStamp) || 0)) {
+        fxRecord = saved.fx; liveFx = fxRecord.value;
+      }
+      for (const [id, p] of Object.entries(saved.prices)) {
+        const stock = dbMeta.stocks.find(s => String(s.id) === id);
+        if (p?.value > 0 && stock?.code === p.code && stock.tab === p.tab
+            && Date.parse(p.at) > (Date.parse(lastData.dbStamps[id]) || 0)) {
+          quoteRecords[id] = p; livePrices[id] = p.value;
+        } else if (Number.isFinite(p) && p > 0 && !lastData.dbPrices[id]) livePrices[id] = p;
+      }
       renderPortfolio();
       if (info && saved.updated_at)
         info.textContent = `저장된 시세 · ${fmtKst(saved.updated_at)}`;
@@ -433,7 +492,7 @@ async function runPriceRefresh(info) {
   // 환율 먼저 (해외주식 환산 반영)
   try {
     const j = await (await fetch(`${PROXY_BASE}/fx`, { signal: AbortSignal.timeout(25000) })).json();
-    if (j && j.usdkrw > 0) liveFx = j.usdkrw;
+    if (j && j.usdkrw > 0) { liveFx = j.usdkrw; fxRecord = { value: liveFx, at: new Date().toISOString() }; }
   } catch { /* 실패 시 DB 환율 유지 */ }
 
   // 보유 종목만 시세 조회 (실현손익은 가격 불필요)
@@ -449,7 +508,7 @@ async function runPriceRefresh(info) {
         : `${PROXY_BASE}/price?market=${p.tab === "펀드" ? "FUND" : (p.currency === "USD" ? "USD" : "KRW")}`
           + `&code=${encodeURIComponent(p.code || "")}&name=${encodeURIComponent(p.name || "")}`;
       const j = await (await fetch(url, { signal: AbortSignal.timeout(60000) })).json();
-      if (j && j.price > 0) { fresh[p.id] = j.price; ok++; } else fail++;
+      if (j && j.price > 0) { fresh[p.id] = j.price; quoteRecords[p.id] = { code: p.code, tab: p.tab, value: j.price, at: new Date().toISOString() }; ok++; } else fail++;
     } catch { fail++; }
   });
 
@@ -460,7 +519,7 @@ async function runPriceRefresh(info) {
 
   // Drive(prices.json)에 반영 — 폰 재실행 시 유지 + 데스크톱이 흡수해 portfolio.db 반영 (ADR-0002)
   try {
-    await writePrices({ updated_at: new Date().toISOString(), usdkrw: liveFx || null, prices: livePrices });
+    await writePrices({ updated_at: new Date().toISOString(), fx: fxRecord, prices: quoteRecords });
   } catch { /* 기록 실패해도 화면 표시엔 지장 없음 */ }
 
   const fxTxt = liveFx ? ` · 환율 ${Math.round(liveFx).toLocaleString("ko-KR")}` : "";
@@ -486,12 +545,21 @@ async function pushInbox(item) {
   if (inboxWriting) throw new Error("이전 입력을 저장 중입니다. 잠시 후 다시 시도하세요.");
   inboxWriting = true;
   try {
-  const { fileId, items } = await readInbox();
-  items.push(item);
-  await writeInbox(fileId, items);
-  pendingItems = items;
-  renderPending(items);
-  populateAddForm();   // 새 대기 종목을 거래 폼에 즉시 반영
+    if (!backupRoot) throw new Error("먼저 기준 PC에서 새 형식으로 Drive 백업을 실행하세요.");
+    const key = "pending-upload-" + backupRoot;
+    const {id: unusedId, ts: unusedTime, ...fields} = item;
+    let retry = JSON.parse(sessionStorage.getItem(key) || "null");
+    if (!retry || JSON.stringify(retry.fields) !== JSON.stringify(fields)) {
+      const result = await (await driveFetch("https://www.googleapis.com/drive/v3/files/generateIds?count=1&space=appDataFolder")).json();
+      retry = { fields, item: { ...item, id: result.ids[0] } };
+      sessionStorage.setItem(key, JSON.stringify(retry));
+    }
+    try { await createJson("portfolio-v2-input.json", retry.item, retry.item.id); }
+    catch (err) { if (err.status !== 409 || !(await readJson(retry.item.id))) throw err; }
+    sessionStorage.removeItem(key);
+    pendingItems.push(retry.item);
+    renderPending(pendingItems);
+    populateAddForm();   // 새 대기 종목을 거래 폼에 즉시 반영
   } finally { inboxWriting = false; }
 }
 
@@ -503,6 +571,8 @@ async function submitAdd(e) {
   const item = {
     id: genId(), ts: new Date().toISOString(), kind: "tx",
     account_id: +f.account_id.value,
+    account_name: f.account_id.selectedOptions[0]?.textContent,
+    fx_rate: f.fx_rate.value ? +f.fx_rate.value : null,
     trade_date: f.trade_date.value,
     trade_type: f.trade_type.value,
     price: +f.price.value || 0,
@@ -519,6 +589,17 @@ async function submitAdd(e) {
     item.code = c; item.tab = t;
   }
   try {
+    if (item.tab !== "해외주식") item.fx_rate = null;
+    if (item.trade_type === "SELL") {
+      const transactions = (lastData.chart.txsMap[item.stock_id] || []).concat(
+        pendingItems.filter(p => p.kind === "tx" && p.code === item.code && p.tab === item.tab), item);
+      let qty = 0;
+      for (const tx of transactions.filter(t => t.account_id === item.account_id)
+           .sort((a,b) => a.trade_date.localeCompare(b.trade_date))) {
+        if (tx.trade_type !== "DIVIDEND") qty += tx.quantity * (tx.trade_type === "SELL" ? -1 : 1);
+        if (qty < -1e-8) throw new Error(tx.trade_date + " 계좌 보유수량을 초과합니다.");
+      }
+    }
     showToast("입력함에 저장 중…");
     await pushInbox(item);
     closeModal();

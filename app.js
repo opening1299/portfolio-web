@@ -284,23 +284,23 @@ const genId = () => (crypto.randomUUID ? crypto.randomUUID() : "id" + Date.now()
 function renderSummary(s) {
   $("summaryCards").innerHTML = `
     <div class="card full">
-      <div class="label">총 평가액</div>
-      <div class="value">${won(s.totEval)}</div>
+      <div class="label">총 평가금액</div>
+      <div class="value ${cls(s.pnl)}">${won(s.totEval)}</div>
     </div>
     <div class="card">
-      <div class="label">평가손익</div>
+      <div class="label">평가 수익</div>
       <div class="value ${cls(s.pnl)}">${won(s.pnl)}<br><span style="font-size:14px">${pct(s.rate)}</span></div>
     </div>
     <div class="card">
-      <div class="label">총 매입액</div>
+      <div class="label">총 매입금액</div>
       <div class="value">${won(s.totBuy)}</div>
     </div>
     <div class="card">
-      <div class="label">실현손익(누적)</div>
+      <div class="label">실현수익(누적)</div>
       <div class="value ${cls(s.realized)}">${won(s.realized)}</div>
     </div>
     <div class="card">
-      <div class="label">배당 합계</div>
+      <div class="label">배당금</div>
       <div class="value">${won(s.div)}</div>
     </div>`;
 }
@@ -315,7 +315,7 @@ function renderHoldings(rows) {
       <td class="num">${(+r.qty).toLocaleString("ko-KR")}</td>
       <td class="num">${fmt(r.avg, r.cur)}</td>
       <td class="num">${fmt(r.cp, r.cur)}</td>
-      <td class="num">${won(r.evalKrw)}</td>
+      <td class="num ${cls(r.pnl)}">${won(r.evalKrw)}</td>
       <td class="num ${cls(r.pnl)}">${won(r.pnl)}<br><span class="small">${pct(r.rate)}</span></td>
     </tr>`).join("");
 }
@@ -495,7 +495,7 @@ async function runPriceRefresh(info) {
     if (j && j.usdkrw > 0) { liveFx = j.usdkrw; fxRecord = { value: liveFx, at: new Date().toISOString() }; }
   } catch { /* 실패 시 DB 환율 유지 */ }
 
-  // 보유 종목만 시세 조회 (실현손익은 가격 불필요)
+  // 보유 종목만 시세 조회 (실현수익은 가격 불필요)
   const held = lastData.positions.filter((p) => p.holdings > EPS);
   const fresh = {};
   let ok = 0, fail = 0;

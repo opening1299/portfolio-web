@@ -91,6 +91,16 @@ async function writePrices(obj) {
   if (!r.ok) throw new Error("시세 파일을 저장할 수 없습니다.");
 }
 
+// 연결 기록은 앞 기록이 정해 둔 ID로만 한 번 생성되고 수정되지 않는다(drive_versions.publish).
+// 따라서 가장 최근에 생성된 기록이 최신 기록이다. 목록 반영이 늦으면 호출부가 next를 따라 보정한다.
+async function newestCommitId() {
+  const params = new URLSearchParams({ spaces: "appDataFolder",
+    q: "name='portfolio-v2-commit.json' and trashed=false",
+    fields: "files(id)", orderBy: "createdTime desc", pageSize: "1" });
+  const data = await (await driveFetch("https://www.googleapis.com/drive/v3/files?" + params)).json();
+  return data.files?.[0]?.id || null;
+}
+
 // ── SQLite (sql.js) ─────────────────────────────────────────
 let SQL = null;
 async function openDb() {
@@ -105,8 +115,9 @@ async function openDb() {
     if (!roots.some(root => root.id === backupRoot)) throw new Error("PC에서 기준 백업을 선택하세요.");
   }
   if (backupRoot) {
-    const cacheKey = "portfolio-head-" + backupRoot;
-    let fid = sessionStorage.getItem(cacheKey) || backupRoot;
+    // 시작 기록이 하나면 최신 연결 기록부터 시작 — 처음부터 따라 읽으면 백업 수만큼 순차 호출이 쌓인다.
+    // 시작 기록이 여럿이면 연결 기록의 소속을 구분할 수 없어 시작 기록부터 따라 읽는다.
+    let fid = (roots.length === 1 && await newestCommitId()) || backupRoot;
     let record = await readJson(fid);
     const seen = new Set();
     while (record) {
@@ -123,7 +134,6 @@ async function openDb() {
       const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
       const hash = Array.from(digest, b => b.toString(16).padStart(2, "0")).join("");
       if (hash !== record.sha256) throw new Error("백업 파일 검증에 실패했습니다.");
-      sessionStorage.setItem(cacheKey, fid);
       return new SQL.Database(bytes);
     }
   }

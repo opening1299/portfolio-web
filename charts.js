@@ -5,30 +5,45 @@
 export const EPS = 1e-9;
 
 // ── calculator.py 이식: 평균단가법 포지션 (app.js에서도 재사용) ──
+// 이동평균은 계좌별로 쌓는다(calculator._AccountBook) — 한 계좌를 전량 매도해도 다른 계좌 보유로
+// 합산 보유수가 0이 되지 않으면 판 매수분이 합산 평단가에 남기 때문. 매도 실현손익도 그 계좌 평단가 기준.
+// books: Map(account_id → {holdings, avg}) — 이어서 계산(previous)할 때 넘겨받아 복사해 쓴다.
 export function position(txs, previous = {}, start = 0, end = txs.length) {
   let { holdings = 0, avg = 0, realized = 0, dividend = 0 } = previous;
+  const books = new Map(previous.books || []);
   for (let index = start; index < end; index++) {
     const tx = txs[index];
     const price = +tx.price, qty = +tx.quantity, fee = +tx.fee, t = tx.trade_type;
+    const key = tx.account_id ?? null;
+    let { holdings: h, avg: a } = books.get(key) || { holdings: 0, avg: 0 };
     if (t === "BUY") {
-      const total = holdings * avg + qty * price + fee;
-      holdings += qty;
-      avg = holdings ? total / holdings : 0;
+      const total = h * a + qty * price + fee;
+      h += qty;
+      a = h ? total / h : 0;
     } else if (t === "SELL") {
-      realized += (price - avg) * qty - fee;
-      holdings -= qty;
-      if (holdings < EPS) { holdings = 0; avg = 0; }
+      realized += (price - a) * qty - fee;
+      h -= qty;
+      if (h < EPS) { h = 0; a = 0; }
     } else if (t === "DIVIDEND") {
       const d = price - fee;      // 배당 = 단가(총액) − 수수료
       dividend += d; realized += d;
     } else if (t === "REINVEST") {
       // 펀드 결산 재투자 — 원가(매입금액) 그대로, 보유수만 증가 → 평단가 희석
-      const total = holdings * avg;
-      holdings += qty;
-      avg = holdings ? total / holdings : 0;
+      const total = h * a;
+      h += qty;
+      a = h ? total / h : 0;
+    }
+    books.set(key, { holdings: h, avg: a });
+    const held = [...books.values()].filter((b) => b.holdings > 0);
+    if (held.length === 1) {        // 단일 계좌 — 기존 계산과 같은 값 유지
+      ({ holdings, avg } = held[0]);
+    } else {
+      const total = held.reduce((s, b) => s + b.holdings, 0);
+      if (total < EPS) { holdings = 0; avg = 0; }
+      else { holdings = total; avg = held.reduce((s, b) => s + b.holdings * b.avg, 0) / total; }
     }
   }
-  return { holdings, avg, purchase: avg * holdings, realized, dividend };
+  return { holdings, avg, purchase: avg * holdings, realized, dividend, books };
 }
 
 // ── 순수 계산 (history.py 이식) ─────────────────────────────
